@@ -56,12 +56,13 @@ RUN apt-get -y install ruby --assume-yes
 RUN gem install bundler
 
 # Kotlin
+RUN echo | openssl s_client -showcerts -servername get.sdkman.io -connect get.sdkman.io:443 2>/dev/null | awk '/-----BEGIN CERTIFICATE-----/, /-----END CERTIFICATE-----/' >> /usr/local/share/ca-certificates/ca-certificates.crt  && update-ca-certificates
 RUN curl -s https://get.sdkman.io | bash
 RUN /bin/bash -c "source /root/.sdkman/bin/sdkman-init.sh && sdk install kotlin"
 ENV PATH="/root/.sdkman/candidates/kotlin/current/bin:${PATH}"
 
 # Python
-RUN add-apt-repository ppa:jonathonf/python-3.6
+RUN add-apt-repository ppa:deadsnakes/ppa
 RUN apt-get -y update
 RUN apt-get -y install python3.6 --assume-yes
 RUN curl https://bootstrap.pypa.io/get-pip.py | python3.6
@@ -79,6 +80,9 @@ RUN curl -sL "https://keybase.io/crystal/pgp_keys.asc" | apt-key add -
 RUN echo "deb https://dist.crystal-lang.org/apt crystal main" | tee /etc/apt/sources.list.d/crystal.list
 RUN apt-get -y update
 RUN apt-get -y install crystal --assume-yes
+
+# Haskell
+RUN curl -sL "https://get.haskellstack.org/" | sh
 
 ENV PATH="${workdir}/node_modules/.bin:${PATH}"
 

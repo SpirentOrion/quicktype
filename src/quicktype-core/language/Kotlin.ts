@@ -40,14 +40,15 @@ import { RenderContext } from "../Renderer";
 export enum Framework {
     None,
     Jackson,
-    Klaxon
+    Klaxon,
+    KotlinX,
 }
 
 export const kotlinOptions = {
     framework: new EnumOption(
         "framework",
         "Serialization framework",
-        [["just-types", Framework.None], ["jackson", Framework.Jackson], ["klaxon", Framework.Klaxon]],
+        [["just-types", Framework.None], ["jackson", Framework.Jackson], ["klaxon", Framework.Klaxon], ["kotlinx", Framework.KotlinX]],
         "klaxon"
     ),
     packageName: new StringOption("package", "Package", "PACKAGE", "quicktype")
@@ -55,7 +56,7 @@ export const kotlinOptions = {
 
 export class KotlinTargetLanguage extends TargetLanguage {
     constructor() {
-        super("Kotlin (beta)", ["kotlin"], "kt");
+        super("Kotlin", ["kotlin"], "kt");
     }
 
     protected getOptions(): Option<any>[] {
@@ -83,6 +84,8 @@ export class KotlinTargetLanguage extends TargetLanguage {
                 return new KotlinJacksonRenderer(this, renderContext, options);
             case Framework.Klaxon:
                 return new KotlinKlaxonRenderer(this, renderContext, options);
+            case Framework.KotlinX:
+                return new KotlinXRenderer(this, renderContext, options);
             default:
                 return assertNever(options.framework);
         }
@@ -235,13 +238,26 @@ export class KotlinRenderer extends ConvenienceRenderer {
         this.emitLine(close);
     }
 
+    // (asarazan): I've broken out the following three functions
+    // because some renderers, such as kotlinx, can cope with `any`, while some get mad.
+    protected anyType(withIssues: boolean = false, noOptional: boolean = false): Sourcelike {
+        const optional = noOptional ? "" : "?";
+        return maybeAnnotated(withIssues, anyTypeIssueAnnotation, ["Any", optional]);
+    }
+
+    protected arrayType(arrayType: ArrayType, withIssues: boolean = false, _noOptional: boolean = false): Sourcelike {
+        return ["List<", this.kotlinType(arrayType.items, withIssues), ">"];
+    }
+
+    protected mapType(mapType: MapType, withIssues: boolean = false, _noOptional: boolean = false): Sourcelike {
+        return ["Map<String, ", this.kotlinType(mapType.values, withIssues), ">"];
+    }
+
     protected kotlinType(t: Type, withIssues: boolean = false, noOptional: boolean = false): Sourcelike {
         const optional = noOptional ? "" : "?";
         return matchType<Sourcelike>(
             t,
-            _anyType => {
-                return maybeAnnotated(withIssues, anyTypeIssueAnnotation, ["Any", optional]);
-            },
+            _anyType => this.anyType(withIssues, noOptional),
             _nullType => {
                 return maybeAnnotated(withIssues, nullTypeIssueAnnotation, ["Any", optional]);
             },
@@ -249,9 +265,9 @@ export class KotlinRenderer extends ConvenienceRenderer {
             _integerType => "Long",
             _doubleType => "Double",
             _stringType => "String",
-            arrayType => ["List<", this.kotlinType(arrayType.items, withIssues), ">"],
+            arrayType => this.arrayType(arrayType, withIssues),
             classType => this.nameForNamedType(classType),
-            mapType => ["Map<String, ", this.kotlinType(mapType.values, withIssues), ">"],
+            mapType => this.mapType(mapType, withIssues),
             enumType => this.nameForNamedType(enumType),
             unionType => {
                 const nullable = nullableFromUnion(unionType);
@@ -308,6 +324,7 @@ export class KotlinRenderer extends ConvenienceRenderer {
         };
 
         this.emitDescription(this.descriptionForType(c));
+        this.emitClassAnnotations(c, className);
         this.emitLine("data class ", className, " (");
         this.indent(() => {
             let count = c.getProperties().size;
@@ -348,6 +365,10 @@ export class KotlinRenderer extends ConvenienceRenderer {
 
     protected emitClassDefinitionMethods(_c: ClassType, _className: Name) {
         this.emitLine(")");
+    }
+
+    protected emitClassAnnotations(_c: ClassType, _className: Name) {
+        // to be overridden
     }
 
     protected renameAttribute(_name: Name, _jsonName: string, _required: boolean, _meta: Array<() => void>) {
@@ -961,6 +982,126 @@ private fun <T> ObjectMapper.convert(k: kotlin.reflect.KClass<*>, fromJson: (Jso
                 this.emitTable(table);
             });
             this.emitLine("}");
+        });
+    }
+}
+
+/**
+ * Currently supports simple classes, enums, and TS string unions (which are also enums).
+ * TODO: Union, Any, Top Level Array, Top Level Map
+ */
+export class KotlinXRenderer extends KotlinRenderer {
+    constructor(
+        targetLanguage: TargetLanguage,
+        renderContext: RenderContext,
+        _kotlinOptions: OptionValues<typeof kotlinOptions>
+    ) {
+        super(targetLanguage, renderContext, _kotlinOptions);
+    }
+
+    protected anyType(_withIssues: boolean = false, _noOptional: boolean = false): Sourcelike {
+        return "JsonObject";
+    }
+
+    protected arrayType(arrayType: ArrayType, withIssues: boolean = false, noOptional: boolean = false): Sourcelike {
+        const valType = this.kotlinType(arrayType.items, withIssues, true);
+        const name = this.sourcelikeToString(valType);
+        if (name === "JsonObject") {
+            return "JsonArray";
+        }
+        return super.arrayType(arrayType, withIssues, noOptional);
+    }
+
+    protected mapType(mapType: MapType, withIssues: boolean = false, noOptional: boolean = false): Sourcelike {
+        const valType = this.kotlinType(mapType.values, withIssues, true);
+        const name = this.sourcelikeToString(valType);
+        if (name === "JsonObject") {
+            return "JsonObject";
+        }
+        return super.mapType(mapType, withIssues, noOptional);
+    }
+
+    protected emitTopLevelMap(t: MapType, name: Name): void {
+        const elementType = this.kotlinType(t.values);
+        if (elementType === "JsonObject") {
+            this.emitLine(["typealias ", name, " = JsonObject"]);
+        } else {
+            super.emitTopLevelMap(t, name);
+        }
+    }
+
+    protected emitTopLevelArray(t: ArrayType, name: Name): void {
+        const elementType = this.kotlinType(t.items);
+        this.emitLine(["typealias ", name, " = JsonArray<", elementType, ">"]);
+    }
+
+    protected emitUsageHeader(): void {
+        this.emitLine("// To parse the JSON, install kotlin's serialization plugin and do:");
+        this.emitLine("//");
+        const table: Sourcelike[][] = [];
+        table.push(["// val ", "json", " = Json(JsonConfiguration.Stable)"]);
+        this.forEachTopLevel("none", (_, name) => {
+            table.push(["// val ", modifySource(camelCase, name), ` = json.parse(${this.sourcelikeToString(name)}.serializer(), jsonString)`]);
+        });
+        this.emitTable(table);
+    }
+
+    protected emitHeader(): void {
+        super.emitHeader();
+
+        this.emitLine("import kotlinx.serialization.*");
+        this.emitLine("import kotlinx.serialization.json.*");
+        this.emitLine("import kotlinx.serialization.internal.*");
+    }
+
+    protected emitClassAnnotations(_c: ClassType, _className: Name) {
+        this.emitLine("@Serializable");
+    }
+
+    protected renameAttribute(name: Name, jsonName: string, _required: boolean, meta: Array<() => void>) {
+        const rename = this._rename(name, jsonName);
+        if (rename !== undefined) {
+            meta.push(() => this.emitLine(rename));
+        }
+    }
+
+    private _rename(propName: Name, jsonName: string): Sourcelike | undefined {
+        const escapedName = stringEscape(jsonName);
+        const namesDiffer = this.sourcelikeToString(propName) !== escapedName;
+        if (namesDiffer) {
+            return ["@SerialName(\"", escapedName, "\")"];
+        }
+        return undefined;
+    }
+
+    protected emitEnumDefinition(e: EnumType, enumName: Name): void {
+        this.emitDescription(this.descriptionForType(e));
+
+        this.emitLine(["@Serializable(with = ", enumName, ".Companion::class)"]);
+        this.emitBlock(["enum class ", enumName, "(val value: String)"], () => {
+            let count = e.cases.size;
+            this.forEachEnumCase(e, "none", (name, json) => {
+                this.emitLine(name, `("${stringEscape(json)}")`, --count === 0 ? ";" : ",");
+            });
+            this.ensureBlankLine();
+            this.emitBlock(["companion object : KSerializer<", enumName, ">"], () => {
+                this.emitBlock("override val descriptor: SerialDescriptor get()", () => {
+                   this.emitLine("return PrimitiveDescriptor(\"", this._kotlinOptions.packageName, ".", enumName, "\", PrimitiveKind.STRING)");
+                });
+
+                this.emitBlock(["override fun deserialize(decoder: Decoder): ", enumName, " = when (val value = decoder.decodeString())"], () => {
+                    let table: Sourcelike[][] = [];
+                    this.forEachEnumCase(e, "none", (name, json) => {
+                        table.push([[`"${stringEscape(json)}"`], [" -> ", name]]);
+                    });
+                    table.push([["else"], [" -> throw IllegalArgumentException(\"", enumName, " could not parse: $value\")"]]);
+                    this.emitTable(table);
+                });
+
+                this.emitBlock(["override fun serialize(encoder: Encoder, value: ", enumName, ")"], () => {
+                    this.emitLine(["return encoder.encodeString(value.value)"]);
+                });
+            });
         });
     }
 }
