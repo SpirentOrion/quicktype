@@ -655,6 +655,7 @@ export class CPlusPlusRenderer extends ConvenienceRenderer {
             this.emitCommentLines(this.leadingComments);
         } else if (!this._options.justTypes) {
             this.emitCommentLines([
+                " This file is auto-generated.  Do not modify this file manually. ",
                 " To parse this JSON data, first install",
                 "",]);
             if (this._options.boost) {
